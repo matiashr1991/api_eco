@@ -1,56 +1,54 @@
+// middleware/upload.js
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const pool = require('../models/db'); // para consultar el número de guía
 
-// Carpeta donde se guardarán las imágenes
-const uploadDir = path.join(__dirname, '..', 'uploads', 'guias');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+const baseDir = path.join(__dirname, '..', 'uploads');
+const tmpDir = path.join(baseDir, 'tmp');
+
+for (const d of [baseDir, tmpDir]) {
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 
-// Configuración del almacenamiento
+// helper: slug para carpeta (San Vicente -> San_Vicente, sin acentos)
+function slugifyFolder(s) {
+  if (!s) return 'sin-delegacion';
+  return s
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '_');
+}
+
+// crea /uploads/guias/<delegacion_slug>
+function ensureDelegDir(delegacionNombre) {
+  const slug = slugifyFolder(delegacionNombre);
+  const dir = path.join(baseDir, 'guias', slug);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return { dir, slug };
+}
+
+// === dejamos el storage en TMP y después movemos en el controller ===
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
+  destination: (_req, _file, cb) => cb(null, tmpDir),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+    const name = `${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
+    cb(null, name);
   },
-  filename: async (req, file, cb) => {
-    try {
-      const idguia = req.params.idguia;
-
-      // Buscar el número de guía y la fecha de carga en la BD
-      const [rows] = await pool.query(
-        `SELECT nrguia, DATE_FORMAT(NOW(), '%Y-%m-%d') as fecha_actual
-         FROM guiasr
-         WHERE idguiasr = ?`,
-        [idguia]
-      );
-
-      let nombreBase = Date.now().toString(); // fallback
-
-      if (rows.length > 0) {
-        const guia = rows[0];
-        nombreBase = `${guia.nrguia}_${guia.fecha_actual}`;
-      }
-
-      const ext = path.extname(file.originalname);
-      cb(null, `${nombreBase}${ext}`);
-    } catch (error) {
-      console.error('Error generando nombre de archivo:', error);
-      const ext = path.extname(file.originalname);
-      cb(null, `${Date.now()}${ext}`);
-    }
-  }
 });
 
-// Filtro para aceptar solo imágenes
-const fileFilter = (req, file, cb) => {
-  const valid = /jpeg|jpg|png/i.test(path.extname(file.originalname));
-  if (valid) {
-    cb(null, true);
-  } else {
-    cb(new Error('Solo se permiten imágenes (jpg, jpeg, png)'));
-  }
+const allowedExt = new Set(['.jpg', '.jpeg', '.png', '.webp']); // amplíe si querés
+const fileFilter = (_req, file, cb) => {
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  if (allowedExt.has(ext)) return cb(null, true);
+  cb(new Error('Solo se permiten imágenes (jpg, jpeg, png, webp)'));
 };
 
-module.exports = multer({ storage, fileFilter });
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+module.exports = { upload, ensureDelegDir, slugifyFolder };
