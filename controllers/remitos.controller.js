@@ -2,10 +2,19 @@ const pool = require('../models/db');
 
 // Cargar nuevo remito
 exports.cargarRemito = async (req, res) => {
-  const { nrremito, fechavencimiento, guianr, fechacarga, fechadevolucion, devueltosn } = req.body;
+  const {
+    nrremito,
+    fechavencimiento,
+    guianr,
+    fechacarga,
+    fechadevolucion,
+    devueltosn
+  } = req.body;
+
   try {
     const [result] = await pool.query(
-      `INSERT INTO remitor (nrremito, fechavencimiento, guianr, fechacarga, fechadevolucion, devueltosn)
+      `INSERT INTO remitor
+        (nrremito, fechavencimiento, guianr, fechacarga, fechadevolucion, devueltosn)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [nrremito, fechavencimiento, guianr, fechacarga, fechadevolucion, devueltosn]
     );
@@ -16,18 +25,23 @@ exports.cargarRemito = async (req, res) => {
   }
 };
 
-// Actualizar parcialmente un remito
+// Actualizar parcialmente un remito (PATCH /remitos/:id)
 exports.actualizarRemitoParcial = async (req, res) => {
   const { id } = req.params;
   const campos = req.body;
 
-  if (!Object.keys(campos).length) return res.status(400).json({ error: 'No se proporcionaron campos' });
+  if (!Object.keys(campos).length) {
+    return res.status(400).json({ error: 'No se proporcionaron campos' });
+  }
 
   const columnas = Object.keys(campos).map(col => `${col} = ?`).join(', ');
   const valores = Object.values(campos);
 
   try {
-    await pool.query(`UPDATE remitor SET ${columnas} WHERE idremitor = ?`, [...valores, id]);
+    await pool.query(
+      `UPDATE remitor SET ${columnas} WHERE idremitor = ?`,
+      [...valores, id]
+    );
     res.json({ message: 'Remito actualizado parcialmente' });
   } catch (error) {
     console.error('Error al actualizar remito:', error);
@@ -46,29 +60,56 @@ exports.obtenerTodosRemitos = async (_req, res) => {
   }
 };
 
-// Obtener remitos no usados
-exports.obtenerRemitosNoUsados = async (_req, res) => {
+// Obtener remitos NO usados (libres para asociar) con LIMIT/OFFSET
+exports.obtenerRemitosNoUsados = async (req, res) => {
   try {
-    const [rows] = await pool.query(`
-      SELECT nrremito, fechavencimiento, fechacarga, idremitor
+    // Sanitizar
+    let limit = Number.parseInt(req.query.limit, 10);
+    let offset = Number.parseInt(req.query.offset, 10);
+    if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+    if (limit > 500) limit = 500;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+    // "Libre" = sin guía asociada
+    // ⚠️ OJO: NO usar '0000-00-00' en comparaciones; MySQL en modo estricto rompe.
+    const sql = `
+      SELECT
+        idremitor,
+        nrremito,
+        fechavencimiento,
+        fechacarga,
+        guianr,
+        idguiaremovido
       FROM remitor
-      WHERE fechavencimiento IS NULL
-      ORDER BY fechacarga ASC
-    `);
-    res.json(rows);
+      WHERE
+        (guianr IS NULL OR guianr = 0)
+        AND (idguiaremovido IS NULL OR idguiaremovido = 0)
+      ORDER BY nrremito ASC
+      LIMIT ? OFFSET ?
+    `;
+
+    const [rows] = await pool.query(sql, [limit, offset]);
+    res.set('X-Query-Limit', String(limit));
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (error) {
     console.error('Error al obtener remitos no usados:', error);
     res.status(500).json({ error: 'Error al obtener remitos no utilizados' });
   }
 };
-
-// Vincular remito a guía
+// Vincular remito a guía (server-side opcional)
 exports.vincularAGuia = async (req, res) => {
   const { id } = req.params;
-  const { idguia } = req.body;
+  const { idguia } = req.body; // id de guiasr
+
   try {
     await pool.query(
-      `UPDATE remitor SET idguiaremovido = ?, guianr = (SELECT nrguia FROM guiasr WHERE idguiasr = ?) WHERE idremitor = ?`,
+      `
+      UPDATE remitor
+      SET
+        idguiaremovido = ?,
+        guianr = (SELECT nrguia FROM guiasr WHERE idguiasr = ?)
+      WHERE idremitor = ?
+      `,
       [idguia, idguia, id]
     );
     res.json({ message: 'Remito vinculado correctamente' });
@@ -78,7 +119,7 @@ exports.vincularAGuia = async (req, res) => {
   }
 };
 
-// remitos.controller.js
+// Obtener remito por número
 exports.obtenerRemitoPorNumero = async (req, res) => {
   const { nrremito } = req.params;
   try {
@@ -95,4 +136,3 @@ exports.obtenerRemitoPorNumero = async (req, res) => {
     res.status(500).json({ error: 'Error al obtener remito' });
   }
 };
-
