@@ -124,14 +124,10 @@ app.use('/api', ...protect(requireAuth));
    La autorización fina ya está implementada dentro del controller/rutas. */
 app.use('/api/delegaciones', delegacionesRoutes);
 
-<<<<<<< HEAD
 /* Ejemplo: control-general sólo para 'central' (bypass admin) */
 app.use('/api/control-general', ...superRoleGate(['central']), controlGeneralRoutes);
 
 /* Resto de routers (sus controladores aplican checks internos) */
-=======
-/* Resto de routers */
->>>>>>> 9e97659 (controlador de observaciones agregado)
 app.use('/api/remitos', remitosRoutes);
 app.use('/api/guias', guiasRoutes);
 app.use('/api/entregas', entregasRoutes);
