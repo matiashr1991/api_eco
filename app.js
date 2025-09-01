@@ -94,21 +94,17 @@ function userRoles(req) {
 }
 function isAdmin(req) { return userRoles(req).includes('admin'); }
 
-<<<<<<< HEAD
-=======
+
+
 /** Gate de roles con bypass para ADMIN (si PROTECT=true) */
->>>>>>> 9e97659 (controlador de observaciones agregado)
+
 const superRoleGate = (roles) =>
   PROTECT
     ? [(req, res, next) => (isAdmin(req) ? next() : requireRoles(roles)(req, res, next))]
     : [];
 
 /* =========================================
-<<<<<<< HEAD
- * Routers
-=======
- * Rutas
->>>>>>> 9e97659 (controlador de observaciones agregado)
+
  * =======================================*/
 const remitosRoutes = require('./routes/remitos.routes');
 const guiasRoutes = require('./routes/guias.routes');
