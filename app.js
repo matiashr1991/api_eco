@@ -47,7 +47,10 @@ app.use(express.urlencoded({ extended: true }));
 
 /* =========================================
  * Archivos estáticos públicos (sin token)
+<<<<<<< HEAD
  * /uploads -> ./uploads
+=======
+>>>>>>> 9e97659 (controlador de observaciones agregado)
  * =======================================*/
 app.use(
   '/uploads',
@@ -91,24 +94,28 @@ function userRoles(req) {
 }
 function isAdmin(req) { return userRoles(req).includes('admin'); }
 
+<<<<<<< HEAD
+=======
+/** Gate de roles con bypass para ADMIN (si PROTECT=true) */
+>>>>>>> 9e97659 (controlador de observaciones agregado)
 const superRoleGate = (roles) =>
   PROTECT
-    ? [
-      (req, res, next) => {
-        if (isAdmin(req)) return next();
-        return requireRoles(roles)(req, res, next);
-      },
-    ]
+    ? [(req, res, next) => (isAdmin(req) ? next() : requireRoles(roles)(req, res, next))]
     : [];
 
 /* =========================================
+<<<<<<< HEAD
  * Routers
+=======
+ * Rutas
+>>>>>>> 9e97659 (controlador de observaciones agregado)
  * =======================================*/
 const remitosRoutes = require('./routes/remitos.routes');
 const guiasRoutes = require('./routes/guias.routes');
 const controlGeneralRoutes = require('./routes/controlGeneral.routes');
 const entregasRoutes = require('./routes/entregas.routes');
 const delegacionesRoutes = require('./routes/delegaciones.routes');
+const observacionesRoutes = require('./routes/observaciones.routes'); // <-- NUEVO
 
 /* Auth global sobre /api (si PROTECT=true) */
 app.use('/api', ...protect(requireAuth));
@@ -117,13 +124,20 @@ app.use('/api', ...protect(requireAuth));
    La autorización fina ya está implementada dentro del controller/rutas. */
 app.use('/api/delegaciones', delegacionesRoutes);
 
+<<<<<<< HEAD
 /* Ejemplo: control-general sólo para 'central' (bypass admin) */
 app.use('/api/control-general', ...superRoleGate(['central']), controlGeneralRoutes);
 
 /* Resto de routers (sus controladores aplican checks internos) */
+=======
+/* Resto de routers */
+>>>>>>> 9e97659 (controlador de observaciones agregado)
 app.use('/api/remitos', remitosRoutes);
 app.use('/api/guias', guiasRoutes);
 app.use('/api/entregas', entregasRoutes);
+
+// Observaciones (queda bajo /api, protegidas globalmente)
+app.use('/api', observacionesRoutes);
 
 /* =========================================
  * 404 para /api
@@ -138,10 +152,7 @@ app.use('/api', (req, res) => {
 app.use((err, _req, res, _next) => {
   console.error(err);
   const status = err.status || 500;
-  res.status(status).json({
-    ok: false,
-    error: err.message || 'Error interno',
-  });
+  res.status(status).json({ ok: false, error: err.message || 'Error interno' });
 });
 
 /* =========================================
