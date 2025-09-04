@@ -1,5 +1,6 @@
 // controllers/guias.controller.js
-const pool = require('../models/db');
+const db = require('../models/db');
+const { fetchGuiaById } = require('../helpers/deleg');
 
 /** 🧹 Limpia fechas vacías -> NULL */
 function limpiarFechas(campos) {
@@ -20,7 +21,6 @@ function castTinyInt(value) {
 
 /** 🧭 Normaliza campos de entrada a columnas reales */
 function filtrarCamposPermitidos(body) {
-  // columnas reales en guiasr
   const allowed = new Set([
     'nrguia',
     'fechemision',
@@ -33,7 +33,7 @@ function filtrarCamposPermitidos(body) {
     'destino',
     'informada',
     'idtitular',
-    'iddelegacion',
+    // 'iddelegacion'  ← se IGNORA en updates/insert: siempre usamos req.delegacionId
     'idestados',
   ]);
 
@@ -42,33 +42,29 @@ function filtrarCamposPermitidos(body) {
     if (allowed.has(k)) data[k] = v;
   }
 
-  // limpiar fechas vacías
   const limpio = limpiarFechas(data);
 
-  // castear tinyints
   if ('depositosn' in limpio) limpio.depositosn = castTinyInt(limpio.depositosn);
   if ('devueltosn' in limpio) limpio.devueltosn = castTinyInt(limpio.devueltosn);
   if ('informada' in limpio) limpio.informada = castTinyInt(limpio.informada);
 
-  // asegurar enteros donde aplica
   if ('idtitular' in limpio && limpio.idtitular != null) limpio.idtitular = Number(limpio.idtitular);
-  if ('iddelegacion' in limpio && limpio.iddelegacion != null) limpio.iddelegacion = Number(limpio.iddelegacion);
   if ('idestados' in limpio && limpio.idestados != null) limpio.idestados = Number(limpio.idestados);
 
   return limpio;
 }
 
-/** ✅ Cargar nueva guía */
+/** ✅ Cargar nueva guía (fuerza iddelegacion = req.delegacionId) */
 exports.cargarGuia = async (req, res) => {
   try {
-    // Filtrar/normalizar campos válidos
+    const del = req.delegacionId;
     const campos = filtrarCamposPermitidos(req.body);
 
-    const {
+    let {
       nrguia,
       fechemision,
       fechavenci,
-      fechacarga,
+      fechacarga = new Date(),
       fechentregaguia,
       depositosn = 0,
       devueltosn = 0,
@@ -76,73 +72,60 @@ exports.cargarGuia = async (req, res) => {
       destino = null,
       informada = 0,
       idtitular = null,
-      iddelegacion = null,
-      // si no viene idestados, lo inferimos (1 activo si no devuelto; 2 inactivo si devuelto)
       idestados = devueltosn ? 2 : 1,
     } = campos;
 
-    if (!nrguia) {
-      return res.status(400).json({ error: 'nrguia es requerido' });
-    }
+    if (!nrguia) return res.status(400).json({ error: 'nrguia es requerido' });
 
-    // ¿Existe guía con ese número?
-    const [existentes] = await pool.query('SELECT idguiasr FROM guiasr WHERE nrguia = ?', [nrguia]);
-    if (existentes.length > 0) {
-      return res.status(409).json({ error: 'Ya existe una guía con ese número' });
-    }
+    // Unicidad por número dentro de la misma delegación
+    const [[dup]] = await db.query(
+      `SELECT idguiasr FROM guiasr WHERE nrguia=? AND iddelegacion=? LIMIT 1`,
+      [nrguia, del]
+    );
+    if (dup) return res.status(409).json({ error: 'Ya existe una guía con ese número en tu delegación' });
 
-    // Insert principal
-    const [result] = await pool.query(
+    const [result] = await db.query(
       `INSERT INTO guiasr (
         nrguia, fechemision, fechavenci, fechacarga, fechentregaguia,
         depositosn, devueltosn, titular, destino, informada,
         idtitular, iddelegacion, idestados
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        nrguia,
-        fechemision,
-        fechavenci,
-        fechacarga,
-        fechentregaguia,
-        depositosn,
-        devueltosn,
-        titular,
-        destino,
-        informada,
-        idtitular,
-        iddelegacion,
-        idestados,
+        nrguia, fechemision, fechavenci, fechacarga, fechentregaguia,
+        depositosn, devueltosn, titular, destino, informada,
+        idtitular, del, idestados
       ],
     );
 
-    const idGuia = result.insertId;
+    // (si tenés tabla puente y la mantenés por compatibilidad)
+    await db.query('INSERT INTO guias_delegaciones (idguia, iddelegacion) VALUES (?, ?)', [result.insertId, del])
+      .catch(() => { /* si no existe, ignorar */ });
 
-    // Relación guía-delegación (si viene iddelegacion)
-    if (iddelegacion != null) {
-      await pool.query('INSERT INTO guias_delegaciones (idguia, iddelegacion) VALUES (?, ?)', [idGuia, iddelegacion]);
-    }
-
-    res.status(201).json({ message: 'Guía cargada exitosamente', id: idGuia });
+    res.status(201).json({ message: 'Guía cargada exitosamente', id: result.insertId });
   } catch (error) {
     console.error('Error al cargar guía:', error);
     res.status(500).json({ error: 'Error interno al cargar la guía' });
   }
 };
 
-/** ✅ Actualizar parcialmente una guía */
+/** ✅ Actualizar parcialmente una guía (solo de mi delegación) */
 exports.actualizarGuiaParcial = async (req, res) => {
   try {
-    const { id } = req.params;
+    const del = req.delegacionId;
+    const id = Number(req.params.id);
 
-    // Filtrar/normalizar campos válidos
+    const guia = await fetchGuiaById(id, del);
+    if (!guia) return res.status(404).json({ error: 'No encontrada' });
+
     const campos = filtrarCamposPermitidos(req.body);
 
-    // Si llega vacío después de filtrar, evitar UPDATE vacío
+    // No permitir cambiar delegación
+    delete campos.iddelegacion;
+
     if (!Object.keys(campos).length) {
       return res.status(400).json({ error: 'Sin campos válidos para actualizar' });
     }
 
-    // Si NO viene idestados pero viene devueltosn, podemos inferir:
     if (!('idestados' in campos) && 'devueltosn' in campos) {
       campos.idestados = campos.devueltosn ? 2 : 1;
     }
@@ -151,7 +134,11 @@ exports.actualizarGuiaParcial = async (req, res) => {
     const setClause = cols.map((c) => `${c} = ?`).join(', ');
     const values = cols.map((c) => campos[c]);
 
-    await pool.query(`UPDATE guiasr SET ${setClause} WHERE idguiasr = ?`, [...values, id]);
+    values.push(id, del);
+    await db.query(
+      `UPDATE guiasr SET ${setClause} WHERE idguiasr = ? AND iddelegacion = ?`,
+      values
+    );
 
     res.json({ message: 'Guía actualizada parcialmente' });
   } catch (error) {
@@ -160,10 +147,14 @@ exports.actualizarGuiaParcial = async (req, res) => {
   }
 };
 
-/** ✅ Obtener todas las guías */
-exports.obtenerTodasGuias = async (_req, res) => {
+/** ✅ Obtener todas las guías (solo mi delegación) */
+exports.obtenerTodasGuias = async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM guiasr ORDER BY nrguia ASC');
+    const del = req.delegacionId;
+    const [rows] = await db.query(
+      'SELECT * FROM guiasr WHERE iddelegacion=? ORDER BY nrguia ASC',
+      [del]
+    );
     res.json(rows);
   } catch (error) {
     console.error('Error al obtener guías:', error);
@@ -171,23 +162,31 @@ exports.obtenerTodasGuias = async (_req, res) => {
   }
 };
 
-/** ✅ Buscar guía por número */
+/** ✅ Buscar guía por número (mi delegación) */
 exports.buscarPorNumero = async (req, res) => {
   try {
+    const del = req.delegacionId;
     const { nrguia } = req.params;
-    const [rows] = await pool.query('SELECT * FROM guiasr WHERE nrguia = ?', [nrguia]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Guía no encontrada' });
-    res.json(rows[0]);
+    const [[row]] = await db.query(
+      'SELECT * FROM guiasr WHERE nrguia = ? AND iddelegacion=? LIMIT 1',
+      [nrguia, del]
+    );
+    if (!row) return res.status(404).json({ error: 'Guía no encontrada' });
+    res.json(row);
   } catch (error) {
     console.error('Error al buscar guía:', error);
     res.status(500).json({ error: 'Error interno al buscar la guía' });
   }
 };
 
-/** ✅ Solo números de guías */
-exports.obtenerNumerosGuias = async (_req, res) => {
+/** ✅ Solo números de guías (mi delegación) */
+exports.obtenerNumerosGuias = async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT nrguia FROM guiasr ORDER BY nrguia ASC');
+    const del = req.delegacionId;
+    const [rows] = await db.query(
+      'SELECT nrguia FROM guiasr WHERE iddelegacion=? ORDER BY nrguia ASC',
+      [del]
+    );
     res.json(rows.map((r) => r.nrguia));
   } catch (error) {
     console.error('Error al obtener números de guías:', error);
@@ -195,14 +194,16 @@ exports.obtenerNumerosGuias = async (_req, res) => {
   }
 };
 
-/** ✅ Guías no usadas (sin fecha de vencimiento), ordenadas por fecha de carga */
-exports.obtenerGuiasNoUsadas = async (_req, res) => {
+/** ✅ Guías no usadas (sin fecha de vencimiento) – mi delegación */
+exports.obtenerGuiasNoUsadas = async (req, res) => {
   try {
-    const [rows] = await pool.query(
+    const del = req.delegacionId;
+    const [rows] = await db.query(
       `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga
-       FROM guiasr
-       WHERE fechavenci IS NULL
-       ORDER BY fechacarga ASC`,
+         FROM guiasr
+        WHERE iddelegacion=? AND fechavenci IS NULL
+        ORDER BY fechacarga ASC`,
+      [del]
     );
     res.json(rows);
   } catch (error) {
@@ -211,35 +212,16 @@ exports.obtenerGuiasNoUsadas = async (_req, res) => {
   }
 };
 
-/** ✅ Subir imágenes de guía */
-exports.subirImagenes = async (req, res) => {
+/** ✅ Guías sin fecha de emisión (mi delegación) */
+exports.obtenerGuiasSinFechaEmision = async (req, res) => {
   try {
-    const { idguia } = req.params;
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No se subieron imágenes' });
-    }
-
-    const values = req.files.map((f) => [f.path, f.filename, idguia]);
-    await pool.query(
-      'INSERT INTO guias_imagenes (path, nombreImagen, idguia) VALUES ?',
-      [values],
-    );
-
-    res.json({ message: 'Imágenes cargadas correctamente' });
-  } catch (error) {
-    console.error('Error al guardar imágenes:', error);
-    res.status(500).json({ error: 'Error interno al guardar imágenes' });
-  }
-};
-
-/** ✅ Guías sin fecha de emisión (para delegaciones) */
-exports.obtenerGuiasSinFechaEmision = async (_req, res) => {
-  try {
-    const [rows] = await pool.query(
+    const del = req.delegacionId;
+    const [rows] = await db.query(
       `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga
-       FROM guiasr
-       WHERE fechemision IS NULL
-       ORDER BY fechacarga ASC`,
+         FROM guiasr
+        WHERE iddelegacion=? AND fechemision IS NULL
+        ORDER BY fechacarga ASC`,
+      [del]
     );
     res.json(rows);
   } catch (error) {
@@ -248,30 +230,34 @@ exports.obtenerGuiasSinFechaEmision = async (_req, res) => {
   }
 };
 
-/** ✅ Buscar guía por ID */
+/** ✅ Buscar guía por ID (mi delegación) */
 exports.buscarPorId = async (req, res) => {
   try {
-    const { id } = req.params;
-    const [rows] = await pool.query('SELECT * FROM guiasr WHERE idguiasr = ?', [id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Guía no encontrada' });
-    res.json(rows[0]);
+    const del = req.delegacionId;
+    const id = Number(req.params.id);
+    const guia = await fetchGuiaById(id, del);
+    if (!guia) return res.status(404).json({ error: 'Guía no encontrada' });
+    res.json(guia);
   } catch (error) {
     console.error('Error al buscar guía por ID:', error);
     res.status(500).json({ error: 'Error interno al buscar la guía' });
   }
 };
 
-/** 📊 Vista de control general: guías + remitos con imágenes (como arrays) */
-exports.obtenerControlGeneral = async (_req, res) => {
+/** 📊 Control general (mi delegación) */
+exports.obtenerControlGeneral = async (req, res) => {
   try {
-    // Guías con imágenes
-    const [guiasRows] = await pool.query(
+    const del = req.delegacionId;
+
+    const [guiasRows] = await db.query(
       `SELECT g.*,
               GROUP_CONCAT(DISTINCT gi.path) AS imagenes
-       FROM guiasr g
-       LEFT JOIN guias_imagenes gi ON g.idguiasr = gi.idguia
-       GROUP BY g.idguiasr
-       ORDER BY g.fechacarga ASC`,
+         FROM guiasr g
+         LEFT JOIN guias_imagenes gi ON g.idguiasr = gi.idguia
+        WHERE g.iddelegacion=?
+        GROUP BY g.idguiasr
+        ORDER BY g.fechacarga ASC`,
+      [del]
     );
 
     const guias = guiasRows.map((g) => ({
@@ -279,14 +265,15 @@ exports.obtenerControlGeneral = async (_req, res) => {
       imagenes: g.imagenes ? String(g.imagenes).split(',') : [],
     }));
 
-    // Remitos con imágenes (si existe tabla remitos_imagenes)
-    const [remitosRows] = await pool.query(
+    const [remitosRows] = await db.query(
       `SELECT r.*,
               GROUP_CONCAT(DISTINCT ri.path) AS imagenes
-       FROM remitor r
-       LEFT JOIN remitos_imagenes ri ON r.idremitor = ri.idremito
-       GROUP BY r.idremitor
-       ORDER BY r.fechacarga ASC`,
+         FROM remitor r
+         LEFT JOIN remitos_imagenes ri ON r.idremitor = ri.idremito
+        WHERE r.iddelegacion=?
+        GROUP BY r.idremitor
+        ORDER BY r.fechacarga ASC`,
+      [del]
     );
 
     const remitos = remitosRows.map((r) => ({

@@ -2,9 +2,15 @@
 const express = require('express');
 const router = express.Router();
 
+const { requireAuth } = require('../middleware/authz');
+const scopeDelegacion = require('../middleware/scopeDelegacion');
+
 const controller = require('../controllers/remitos.controller');
 const remitosImgCtrl = require('../controllers/remitosImagenes.controller');
 const { upload } = require('../middleware/upload');
+
+// 🔐 Aplica autenticación + scoping DELEG a todo este router
+router.use(requireAuth, scopeDelegacion);
 
 // === Remitos core ===
 router.get('/all', controller.obtenerTodosRemitos);

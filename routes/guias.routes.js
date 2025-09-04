@@ -2,15 +2,20 @@
 const express = require('express');
 const router = express.Router();
 
+const { requireAuth, requireRoles } = require('../middleware/authz');
+const scopeDelegacion = require('../middleware/scopeDelegacion');
+
 const guiasController = require('../controllers/guias.controller');
 const imagenesCtrl = require('../controllers/guiasImagenes.controller');
 const { upload } = require('../middleware/upload');
-const { requireRoles } = require('../middleware/authz');
 
 const PROTECT = process.env.PROTECT_API === 'true';
 const gate = (roles) => (PROTECT ? [requireRoles(roles)] : []);
 
-// 📌 Rutas especiales primero
+// 🔐 Aplica autenticación + scoping DELEG a todo este router
+router.use(requireAuth, scopeDelegacion);
+
+// 📌 Rutas especiales primero (mantengo tus gates)
 router.get('/control-general', ...gate(['admin', 'central']), guiasController.obtenerControlGeneral);
 router.get('/sin-fecha-emision', ...gate(['delegacion', 'admin']), guiasController.obtenerGuiasSinFechaEmision);
 router.get('/no-usadas', guiasController.obtenerGuiasNoUsadas);
@@ -18,7 +23,7 @@ router.get('/numeros', guiasController.obtenerNumerosGuias);
 router.get('/all', guiasController.obtenerTodasGuias);
 router.get('/id/:id', guiasController.buscarPorId);
 
-// 📌 Subida de imágenes (delegación + admin)
+// 📌 Subida de imágenes
 router.post(
     '/:idguia/imagenes',
     ...gate(['delegacion', 'admin']),
