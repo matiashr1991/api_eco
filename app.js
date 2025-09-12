@@ -47,10 +47,7 @@ app.use(express.urlencoded({ extended: true }));
 
 /* =========================================
  * Archivos estáticos públicos (sin token)
-<<<<<<< HEAD
  * /uploads -> ./uploads
-=======
->>>>>>> 9e97659 (controlador de observaciones agregado)
  * =======================================*/
 app.use(
   '/uploads',
@@ -94,29 +91,27 @@ function userRoles(req) {
 }
 function isAdmin(req) { return userRoles(req).includes('admin'); }
 
-
-
 /** Gate de roles con bypass para ADMIN (si PROTECT=true) */
-
 const superRoleGate = (roles) =>
   PROTECT
     ? [(req, res, next) => (isAdmin(req) ? next() : requireRoles(roles)(req, res, next))]
     : [];
 
 /* =========================================
-
+ * Rutas
  * =======================================*/
-const remitosRoutes = require('./routes/remitos.routes');
-const guiasRoutes = require('./routes/guias.routes');
+const remitosRoutes        = require('./routes/remitos.routes');
+const guiasRoutes          = require('./routes/guias.routes');
 const controlGeneralRoutes = require('./routes/controlGeneral.routes');
-const entregasRoutes = require('./routes/entregas.routes');
-const delegacionesRoutes = require('./routes/delegaciones.routes');
-const observacionesRoutes = require('./routes/observaciones.routes'); // <-- NUEVO
+const entregasRoutes       = require('./routes/entregas.routes');
+const delegacionesRoutes   = require('./routes/delegaciones.routes');
+const observacionesRoutes  = require('./routes/observaciones.routes');
+const titularesRoutes      = require('./routes/titulares.routes'); // <-- FIX: agregar router de titulares
 
 /* Auth global sobre /api (si PROTECT=true) */
 app.use('/api', ...protect(requireAuth));
 
-/* 🔧 FIX: NO ponemos gate de roles en el mount de delegaciones.
+/* 🔧 NO ponemos gate de roles en el mount de delegaciones.
    La autorización fina ya está implementada dentro del controller/rutas. */
 app.use('/api/delegaciones', delegacionesRoutes);
 
@@ -127,6 +122,7 @@ app.use('/api/control-general', ...superRoleGate(['central']), controlGeneralRou
 app.use('/api/remitos', remitosRoutes);
 app.use('/api/guias', guiasRoutes);
 app.use('/api/entregas', entregasRoutes);
+app.use('/api/titulares', titularesRoutes); // <-- FIX: montar /api/titulares
 
 // Observaciones (queda bajo /api, protegidas globalmente)
 app.use('/api', observacionesRoutes);

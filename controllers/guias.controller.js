@@ -2,25 +2,36 @@
 const db = require('../models/db');
 const { fetchGuiaById } = require('../helpers/deleg');
 
-/** 🧹 Limpia fechas vacías -> NULL */
+/* ====================== helpers de normalización ====================== */
+
+function getRole(req) {
+  const u = req.user || {};
+  const one = (u.role || '').toString().toLowerCase();
+  const many = Array.isArray(u.roles) ? u.roles.map(x => String(x).toLowerCase()) : [];
+  return { one, many };
+}
+function isAdmin(req) {
+  const { one, many } = getRole(req);
+  return one === 'admin' || many.includes('admin');
+}
+
 function limpiarFechas(campos) {
   const fechas = ['fechemision', 'fechavenci', 'fechacarga', 'fechentregaguia'];
   const out = { ...campos };
-  fechas.forEach((f) => {
+  for (const f of fechas) {
     if (Object.prototype.hasOwnProperty.call(out, f)) {
       if (out[f] === '' || out[f] === null) out[f] = null;
     }
-  });
+  }
   return out;
 }
 
-/** 🔄 Casteo de flags a tinyint(1) */
 function castTinyInt(value) {
   return value === true || value === 1 || value === '1' ? 1 : 0;
 }
 
-/** 🧭 Normaliza campos de entrada a columnas reales */
-function filtrarCamposPermitidos(body) {
+/** Normaliza payload, con permiso opcional de setear iddelegacion para admin */
+function filtrarCamposPermitidos(body, { allowIdDeleg = false } = {}) {
   const allowed = new Set([
     'nrguia',
     'fechemision',
@@ -33,9 +44,9 @@ function filtrarCamposPermitidos(body) {
     'destino',
     'informada',
     'idtitular',
-    // 'iddelegacion'  ← se IGNORA en updates/insert: siempre usamos req.delegacionId
     'idestados',
   ]);
+  if (allowIdDeleg) allowed.add('iddelegacion');
 
   const data = {};
   for (const [k, v] of Object.entries(body || {})) {
@@ -50,15 +61,18 @@ function filtrarCamposPermitidos(body) {
 
   if ('idtitular' in limpio && limpio.idtitular != null) limpio.idtitular = Number(limpio.idtitular);
   if ('idestados' in limpio && limpio.idestados != null) limpio.idestados = Number(limpio.idestados);
+  if ('iddelegacion' in limpio && limpio.iddelegacion != null) limpio.iddelegacion = Number(limpio.iddelegacion);
 
   return limpio;
 }
 
-/** ✅ Cargar nueva guía (fuerza iddelegacion = req.delegacionId) */
+/* ============================ controladores =========================== */
+
+/** Cargar nueva guía (si admin puede indicar iddelegacion, si no se usa la del token) */
 exports.cargarGuia = async (req, res) => {
   try {
-    const del = req.delegacionId;
-    const campos = filtrarCamposPermitidos(req.body);
+    const del = req.delegacionId ?? null;
+    const campos = filtrarCamposPermitidos(req.body, { allowIdDeleg: isAdmin(req) });
 
     let {
       nrguia,
@@ -72,17 +86,25 @@ exports.cargarGuia = async (req, res) => {
       destino = null,
       informada = 0,
       idtitular = null,
+      iddelegacion = del ?? null,
       idestados = devueltosn ? 2 : 1,
     } = campos;
 
     if (!nrguia) return res.status(400).json({ error: 'nrguia es requerido' });
 
-    // Unicidad por número dentro de la misma delegación
+    if (!isAdmin(req) && (iddelegacion == null)) {
+      return res.status(400).json({ error: 'No se pudo determinar tu delegación' });
+    }
+
+    // Unicidad por número dentro de la misma delegación (o NULL si huérfana)
     const [[dup]] = await db.query(
-      `SELECT idguiasr FROM guiasr WHERE nrguia=? AND iddelegacion=? LIMIT 1`,
-      [nrguia, del]
+      `SELECT idguiasr FROM guiasr WHERE nrguia=? AND <COND> LIMIT 1`.replace(
+        '<COND>',
+        iddelegacion == null ? 'iddelegacion IS NULL' : 'iddelegacion = ?'
+      ),
+      iddelegacion == null ? [nrguia] : [nrguia, iddelegacion]
     );
-    if (dup) return res.status(409).json({ error: 'Ya existe una guía con ese número en tu delegación' });
+    if (dup) return res.status(409).json({ error: 'Ya existe una guía con ese número en esa delegación' });
 
     const [result] = await db.query(
       `INSERT INTO guiasr (
@@ -93,13 +115,17 @@ exports.cargarGuia = async (req, res) => {
       [
         nrguia, fechemision, fechavenci, fechacarga, fechentregaguia,
         depositosn, devueltosn, titular, destino, informada,
-        idtitular, del, idestados
+        idtitular, iddelegacion, idestados
       ],
     );
 
-    // (si tenés tabla puente y la mantenés por compatibilidad)
-    await db.query('INSERT INTO guias_delegaciones (idguia, iddelegacion) VALUES (?, ?)', [result.insertId, del])
-      .catch(() => { /* si no existe, ignorar */ });
+    // Tabla puente (si existe)
+    if (iddelegacion != null) {
+      await db.query(
+        'INSERT INTO guias_delegaciones (idguia, iddelegacion) VALUES (?, ?)',
+        [result.insertId, iddelegacion]
+      ).catch(() => {});
+    }
 
     res.status(201).json({ message: 'Guía cargada exitosamente', id: result.insertId });
   } catch (error) {
@@ -108,37 +134,56 @@ exports.cargarGuia = async (req, res) => {
   }
 };
 
-/** ✅ Actualizar parcialmente una guía (solo de mi delegación) */
+/** PATCH parcial de guía (admin bypass + claim automático si está huérfana) */
 exports.actualizarGuiaParcial = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
     const id = Number(req.params.id);
+    const admin = isAdmin(req);
 
-    const guia = await fetchGuiaById(id, del);
+    let guia;
+    if (admin) {
+      const [[row]] = await db.query('SELECT * FROM guiasr WHERE idguiasr=? LIMIT 1', [id]);
+      guia = row || null;
+    } else {
+      const [[row]] = await db.query(
+        'SELECT * FROM guiasr WHERE idguiasr=? AND (iddelegacion=? OR iddelegacion IS NULL) LIMIT 1',
+        [id, del]
+      );
+      guia = row || null;
+    }
     if (!guia) return res.status(404).json({ error: 'No encontrada' });
 
-    const campos = filtrarCamposPermitidos(req.body);
+    const campos = filtrarCamposPermitidos(req.body, { allowIdDeleg: admin });
 
-    // No permitir cambiar delegación
-    delete campos.iddelegacion;
+    // Si el usuario es de delegación y la guía está huérfana, la “reclama”
+    if (!admin && guia.iddelegacion == null && del != null) {
+      campos.iddelegacion = del;
+    }
+
+    // Derivar estado por devueltosn si no llegó idestados
+    if (!('idestados' in campos) && 'devueltosn' in campos) {
+      campos.idestados = campos.devueltosn ? 2 : 1;
+    }
 
     if (!Object.keys(campos).length) {
       return res.status(400).json({ error: 'Sin campos válidos para actualizar' });
-    }
-
-    if (!('idestados' in campos) && 'devueltosn' in campos) {
-      campos.idestados = campos.devueltosn ? 2 : 1;
     }
 
     const cols = Object.keys(campos);
     const setClause = cols.map((c) => `${c} = ?`).join(', ');
     const values = cols.map((c) => campos[c]);
 
-    values.push(id, del);
-    await db.query(
-      `UPDATE guiasr SET ${setClause} WHERE idguiasr = ? AND iddelegacion = ?`,
-      values
-    );
+    // WHERE con bypass admin
+    let where = 'idguiasr = ?';
+    let whereParams = [id];
+
+    if (!admin) {
+      where += ' AND (iddelegacion = ? OR iddelegacion IS NULL)';
+      whereParams.push(del);
+    }
+
+    await db.query(`UPDATE guiasr SET ${setClause} WHERE ${where}`, [...values, ...whereParams]);
 
     res.json({ message: 'Guía actualizada parcialmente' });
   } catch (error) {
@@ -147,10 +192,14 @@ exports.actualizarGuiaParcial = async (req, res) => {
   }
 };
 
-/** ✅ Obtener todas las guías (solo mi delegación) */
+/** Listado completo (admin: todo; delegación: sólo suya) */
 exports.obtenerTodasGuias = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
+    if (isAdmin(req) && del == null) {
+      const [rows] = await db.query('SELECT * FROM guiasr ORDER BY nrguia ASC');
+      return res.json(rows);
+    }
     const [rows] = await db.query(
       'SELECT * FROM guiasr WHERE iddelegacion=? ORDER BY nrguia ASC',
       [del]
@@ -162,13 +211,17 @@ exports.obtenerTodasGuias = async (req, res) => {
   }
 };
 
-/** ✅ Buscar guía por número (mi delegación) */
+/** Buscar por número (admin: todo; delegación: suya o huérfana) */
 exports.buscarPorNumero = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
     const { nrguia } = req.params;
+    if (isAdmin(req)) {
+      const [[row]] = await db.query('SELECT * FROM guiasr WHERE nrguia = ? LIMIT 1', [nrguia]);
+      return row ? res.json(row) : res.status(404).json({ error: 'Guía no encontrada' });
+    }
     const [[row]] = await db.query(
-      'SELECT * FROM guiasr WHERE nrguia = ? AND iddelegacion=? LIMIT 1',
+      'SELECT * FROM guiasr WHERE nrguia = ? AND (iddelegacion=? OR iddelegacion IS NULL) LIMIT 1',
       [nrguia, del]
     );
     if (!row) return res.status(404).json({ error: 'Guía no encontrada' });
@@ -179,10 +232,14 @@ exports.buscarPorNumero = async (req, res) => {
   }
 };
 
-/** ✅ Solo números de guías (mi delegación) */
+/** Solo números (admin: todo; delegación: suya) */
 exports.obtenerNumerosGuias = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
+    if (isAdmin(req) && del == null) {
+      const [rows] = await db.query('SELECT nrguia FROM guiasr ORDER BY nrguia ASC');
+      return res.json(rows.map(r => r.nrguia));
+    }
     const [rows] = await db.query(
       'SELECT nrguia FROM guiasr WHERE iddelegacion=? ORDER BY nrguia ASC',
       [del]
@@ -194,14 +251,24 @@ exports.obtenerNumerosGuias = async (req, res) => {
   }
 };
 
-/** ✅ Guías no usadas (sin fecha de vencimiento) – mi delegación */
+/** Guías “no usadas” = sin vencimiento (delegación: suya o huérfana; admin: todas) */
 exports.obtenerGuiasNoUsadas = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
+    if (isAdmin(req) && del == null) {
+      const [rows] = await db.query(
+        `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga
+           FROM guiasr
+          WHERE fechavenci IS NULL
+          ORDER BY fechacarga ASC`
+      );
+      return res.json(rows);
+    }
     const [rows] = await db.query(
       `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga
          FROM guiasr
-        WHERE iddelegacion=? AND fechavenci IS NULL
+        WHERE (iddelegacion=? OR iddelegacion IS NULL)
+          AND fechavenci IS NULL
         ORDER BY fechacarga ASC`,
       [del]
     );
@@ -212,15 +279,29 @@ exports.obtenerGuiasNoUsadas = async (req, res) => {
   }
 };
 
-/** ✅ Guías sin fecha de emisión (mi delegación) */
+/** Guías “disponibles” para emitir = sin fecha de emisión */
 exports.obtenerGuiasSinFechaEmision = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
+
+    if (isAdmin(req) && del == null) {
+      // Admin sin delegación: ve todas las huérfanas y también las que ya tengan delegación (si querés, dejá sólo huérfanas)
+      const [rows] = await db.query(
+        `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga, iddelegacion
+           FROM guiasr
+          WHERE fechemision IS NULL
+          ORDER BY (iddelegacion IS NULL) DESC, fechacarga ASC`
+      );
+      return res.json(rows);
+    }
+
+    // Usuario de delegación (o admin con del): suyas + huérfanas
     const [rows] = await db.query(
-      `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga
+      `SELECT idguiasr, nrguia, fechemision, fechavenci, fechacarga, iddelegacion
          FROM guiasr
-        WHERE iddelegacion=? AND fechemision IS NULL
-        ORDER BY fechacarga ASC`,
+        WHERE (iddelegacion=? OR iddelegacion IS NULL)
+          AND fechemision IS NULL
+        ORDER BY (iddelegacion IS NULL) DESC, fechacarga ASC`,
       [del]
     );
     res.json(rows);
@@ -230,34 +311,45 @@ exports.obtenerGuiasSinFechaEmision = async (req, res) => {
   }
 };
 
-/** ✅ Buscar guía por ID (mi delegación) */
+/** Buscar guía por ID (admin: cualquiera; delegación: suya o huérfana) */
 exports.buscarPorId = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
     const id = Number(req.params.id);
-    const guia = await fetchGuiaById(id, del);
-    if (!guia) return res.status(404).json({ error: 'Guía no encontrada' });
-    res.json(guia);
+    if (isAdmin(req)) {
+      const [[row]] = await db.query('SELECT * FROM guiasr WHERE idguiasr=? LIMIT 1', [id]);
+      return row ? res.json(row) : res.status(404).json({ error: 'Guía no encontrada' });
+    }
+    const [[row]] = await db.query(
+      'SELECT * FROM guiasr WHERE idguiasr = ? AND (iddelegacion=? OR iddelegacion IS NULL) LIMIT 1',
+      [id, del]
+    );
+    if (!row) return res.status(404).json({ error: 'Guía no encontrada' });
+    res.json(row);
   } catch (error) {
     console.error('Error al buscar guía por ID:', error);
     res.status(500).json({ error: 'Error interno al buscar la guía' });
   }
 };
 
-/** 📊 Control general (mi delegación) */
+/** Control general (admin: todo; delegación: suya) */
 exports.obtenerControlGeneral = async (req, res) => {
   try {
-    const del = req.delegacionId;
+    const del = req.delegacionId ?? null;
+    const admin = isAdmin(req);
+
+    const where = admin && del == null ? '1=1' : 'g.iddelegacion = ?';
+    const params = admin && del == null ? [] : [del];
 
     const [guiasRows] = await db.query(
       `SELECT g.*,
               GROUP_CONCAT(DISTINCT gi.path) AS imagenes
          FROM guiasr g
          LEFT JOIN guias_imagenes gi ON g.idguiasr = gi.idguia
-        WHERE g.iddelegacion=?
+        WHERE ${where}
         GROUP BY g.idguiasr
         ORDER BY g.fechacarga ASC`,
-      [del]
+      params
     );
 
     const guias = guiasRows.map((g) => ({
@@ -270,10 +362,10 @@ exports.obtenerControlGeneral = async (req, res) => {
               GROUP_CONCAT(DISTINCT ri.path) AS imagenes
          FROM remitor r
          LEFT JOIN remitos_imagenes ri ON r.idremitor = ri.idremito
-        WHERE r.iddelegacion=?
+        WHERE ${admin && del == null ? '1=1' : 'r.iddelegacion = ?'}
         GROUP BY r.idremitor
         ORDER BY r.fechacarga ASC`,
-      [del]
+      admin && del == null ? [] : [del]
     );
 
     const remitos = remitosRows.map((r) => ({
