@@ -8,13 +8,21 @@ function stripAccents(s = '') {
 function canon(s = '') {
   return stripAccents(String(s).toLowerCase().trim());
 }
+
+/**
+ * ❗ Ajustado según tu tabla:
+ * 2: admin
+ * 3: delegacion
+ * 4: control
+ * 5: auditor
+ * 6: recaudacion
+ */
 function mapRoleIdToName(id) {
-  // Ajustá estos IDs a los de tu tabla roles
-  const map = { 2: 'admin', 3: 'delegacion', 4: 'recaudacion', 5: 'bosques' };
+  const map = { 2: 'admin', 3: 'delegacion', 4: 'control', 5: 'auditor', 6: 'recaudacion' };
   return map[Number(id)] || '';
 }
+
 function resolveRoleFromReq(req) {
-  // req.user debe venir seteado por tu middleware de auth (JWT -> req.user)
   const u = req.user || {};
   let raw =
     u.role ??
@@ -26,14 +34,10 @@ function resolveRoleFromReq(req) {
     '';
 
   // Si vino id numérico
-  if (!raw && u.idroles != null) {
-    raw = mapRoleIdToName(u.idroles);
-  }
+  if (!raw && u.idroles != null) raw = mapRoleIdToName(u.idroles);
 
   // Si vino arreglo
-  if (Array.isArray(raw)) {
-    raw = raw[0];
-  }
+  if (Array.isArray(raw)) raw = raw[0];
 
   // Si vino objeto tipo { idroles, dsc }
   if (raw && typeof raw === 'object') {
@@ -45,9 +49,11 @@ function resolveRoleFromReq(req) {
   const r = canon(String(raw));
   if (r.startsWith('admin') || r === 'role_admin') return 'admin';
   if (r.startsWith('deleg') || r.includes('role_deleg') || r === 'delegacion' || r === 'delegación') return 'delegacion';
+  if (r.startsWith('control')) return 'control';                 // <-- agregado
   if (r.startsWith('recaud') || r.includes('recaudacion') || r.includes('recaudación') || r === 'role_recaud' || r === 'role_recaudacion') return 'recaudacion';
   if (r.startsWith('bosq') || r === 'bosques') return 'bosques';
   if (r.includes('central')) return 'central';
+  if (r.startsWith('auditor')) return 'auditor';
   return r || '';
 }
 
@@ -64,9 +70,9 @@ function forbid(res, info = '') {
 /* ========= Controladores ========= */
 
 // GET /api/delegaciones/dele
-// Permitir a: admin, central, recaudacion
+// ✅ Permitir a: admin, central, recaudacion, control
 exports.obtenerDelegaciones = async (req, res) => {
-  if (!isAllowed(req, ['admin', 'central', 'recaudacion'])) {
+  if (!isAllowed(req, ['admin', 'central', 'recaudacion', 'control'])) {
     return forbid(res, 'delegaciones:list');
   }
 
@@ -82,9 +88,9 @@ exports.obtenerDelegaciones = async (req, res) => {
 };
 
 // GET /api/delegaciones/:id
-// Permitir a: admin, central, recaudacion
+// ✅ Permitir a: admin, central, recaudacion, control
 exports.obtenerDelegacionPorId = async (req, res) => {
-  if (!isAllowed(req, ['admin', 'central', 'recaudacion'])) {
+  if (!isAllowed(req, ['admin', 'central', 'recaudacion', 'control'])) {
     return forbid(res, 'delegaciones:get');
   }
 
@@ -104,8 +110,8 @@ exports.obtenerDelegacionPorId = async (req, res) => {
   }
 };
 
-// POST /api/delegaciones
-// Permitir a: admin (cambiar si querés sumar 'central')
+// POST /api/delegaciones/dele (si lo usás)
+// ✅ Sólo admin
 exports.crearDelegacion = async (req, res) => {
   if (!isAllowed(req, ['admin'])) {
     return forbid(res, 'delegaciones:create');
@@ -113,9 +119,7 @@ exports.crearDelegacion = async (req, res) => {
 
   const { nombre, email } = req.body;
   if (!nombre || !email) {
-    return res
-      .status(400)
-      .json({ error: 'Nombre y email son obligatorios' });
+    return res.status(400).json({ error: 'Nombre y email son obligatorios' });
   }
 
   try {
